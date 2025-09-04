@@ -3,105 +3,66 @@ package ru.netology;
 import java.io.*;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.nio.file.Files;
-import java.nio.file.Path;
-import java.time.LocalDateTime;
-import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.Map;
+import java.util.concurrent.*;
 
 public class Server {
-    private final int port;
     private final ExecutorService threadPool;
-    private final List<String> validPaths = List.of(
-            "/index.html", "/spring.svg", "/spring.png", "/resources.html",
-            "/styles.css", "/app.js", "/links.html", "/forms.html",
-            "/classic.html", "/events.html", "/events.js"
-    );
+    private final Map<String, Map<String, Handler>> handlers = new ConcurrentHashMap<>();
 
-    public Server(int port, int poolSize) {
-        this.port = port;
-        this.threadPool = Executors.newFixedThreadPool(poolSize);
+    public Server() {
+        this.threadPool = Executors.newFixedThreadPool(64);
     }
 
-    public void start() {
-        System.out.println("Server started on port " + port);
+    public void addHandler(String method, String path, Handler handler) {
+        handlers.computeIfAbsent(method, k -> new ConcurrentHashMap<>())
+                .put(path, handler);
+    }
+
+    public void listen(int port) {
         try (ServerSocket serverSocket = new ServerSocket(port)) {
+            System.out.println("Server started at port " + port);
             while (true) {
                 Socket socket = serverSocket.accept();
-                threadPool.submit(() -> handleClient(socket));
+                threadPool.submit(() -> handleConnection(socket));
             }
         } catch (IOException e) {
             e.printStackTrace();
-        } finally {
-            shutdown();
         }
     }
 
-    private void handleClient(Socket socket) {
-        try (socket;
-             BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
-             BufferedOutputStream out = new BufferedOutputStream(socket.getOutputStream())) {
+    private void handleConnection(Socket socket) {
+        try (
+                socket;
+                BufferedReader in = new BufferedReader(new InputStreamReader(socket.getInputStream()));
+                BufferedOutputStream out = new BufferedOutputStream(socket.getOutputStream())
+        ) {
+            Request request = new Request(in);
+            Handler handler = findHandler(request);
 
-            // Читаем первую строку запроса
-            String requestLine = in.readLine();
-            if (requestLine == null || requestLine.isBlank()) return;
-
-            String[] parts = requestLine.split(" ");
-            if (parts.length != 3) return;
-
-            String path = parts[1];
-
-            if (!validPaths.contains(path)) {
-                sendNotFound(out);
-                return;
+            if (handler != null) {
+                handler.handle(request, out);
+            } else {
+                write404(out);
             }
-
-            Path filePath = Path.of(".", "public", path);
-            String mimeType = Files.probeContentType(filePath);
-
-            // обработка special case: classic.html
-            if ("/classic.html".equals(path)) {
-                String template = Files.readString(filePath);
-                byte[] content = template.replace("{time}", LocalDateTime.now().toString()).getBytes();
-                sendResponse(out, mimeType, content);
-                return;
-            }
-
-            // обычный случай
-            byte[] content = Files.readAllBytes(filePath);
-            sendResponse(out, mimeType, content);
 
         } catch (IOException e) {
             e.printStackTrace();
         }
     }
 
-    private void sendNotFound(OutputStream out) throws IOException {
-        out.write((
-                "HTTP/1.1 404 Not Found\r\n" +
-                        "Content-Length: 0\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n"
-        ).getBytes());
-        out.flush();
+    private Handler findHandler(Request request) {
+        Map<String, Handler> methodHandlers = handlers.get(request.getMethod());
+        if (methodHandlers == null) return null;
+        return methodHandlers.get(request.getPath());
     }
 
-    private void sendResponse(OutputStream out, String mimeType, byte[] content) throws IOException {
-        out.write((
-                "HTTP/1.1 200 OK\r\n" +
-                        "Content-Type: " + mimeType + "\r\n" +
-                        "Content-Length: " + content.length + "\r\n" +
-                        "Connection: close\r\n" +
-                        "\r\n"
-        ).getBytes());
-        out.write(content);
+    private void write404(BufferedOutputStream out) throws IOException {
+        String response = "HTTP/1.1 404 Not Found\r\n" +
+                "Content-Length: 0\r\n" +
+                "Connection: close\r\n" +
+                "\r\n";
+        out.write(response.getBytes());
         out.flush();
-    }
-
-    private void shutdown() {
-        threadPool.shutdown();
-        System.out.println("Server stopped.");
     }
 }
-
